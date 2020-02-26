@@ -1,0 +1,172 @@
+import com.android.build.gradle.api.BaseVariant
+import com.android.build.gradle.api.TestVariant
+import com.android.build.gradle.api.UnitTestVariant
+import com.android.build.gradle.internal.publishing.AndroidArtifacts
+import com.android.build.gradle.internal.variant.BaseVariantData
+import org.gradle.api.artifacts.ArtifactCollection
+
+/*
+ * Namespaces R-references in Java and Kotlin code. Apply this script on any Gradle module that
+ * has the Android plugin applied.
+ */
+
+/**
+ * Creates a Closure that can read symbol package info into a map. If a package is provided,
+ * it will be used as is.
+ */
+static Closure<File> getSymbolFileReader(String pkg, Map<String, String> resMap) {
+    return { file ->
+        def firstLineRead = false
+        file.readLines().each { line ->
+            // First line in the file is the package
+            if (!firstLineRead) {
+                if (pkg == null) {
+                    pkg = line
+                }
+                firstLineRead = true
+            } else {
+                def sp = line.split(' ')
+                def res = sp[0] + '.' + sp[1]
+
+                if (!resMap.containsKey(res)) {
+                    resMap.put(res, pkg)
+                }
+
+                if (sp[0] == 'styleable') {
+                    sp[1..-1].each { attr ->
+                        res = sp[0] + '.' + sp[1] + '_' + attr
+                        if (!resMap.containsKey(res)) {
+                            resMap.put(res, pkg)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+static Map<String, String> getResMap(String modulePackage, File moduleSymbolFile, ArtifactCollection artifactSymbolFiles) {
+    Map<String, String> resMap = [:]
+
+    moduleSymbolFile.with(getSymbolFileReader(modulePackage, resMap))
+
+    artifactSymbolFiles.collect { it.file }.findAll { it.isFile() }.each { it.with(getSymbolFileReader(null, resMap)) }
+
+    return resMap
+}
+
+void namespaceFile(Map<String, String> resMap, File srcFile, String modulePackage) {
+    def src = srcFile.text
+    def replaced = false
+    def availableRClassPackage = ( src =~ /(?<=package )[A-Za-z0-9_.]+/)[0]
+
+    // if an R class is imported explicitly, use that one instead
+    def importMatcher = src =~ /(?m)(?<=import )([A-Za-z0-9_.]+)(?:\.R;?)$/
+    if (importMatcher.find()) {
+        availableRClassPackage = importMatcher.group(1)
+    }
+
+    def matcher = src =~ /(?ms)(?<!\.)R\s*\.\s*[a-z]+\s*\.\s*[A-Za-z0-9_]+\b/
+    matcher.each { match ->
+        String rref = match.replaceAll('\\s', '')
+        rref = rref.substring(2)
+        String originatingPackage = resMap.get(rref)
+
+        if (originatingPackage != null && (originatingPackage != availableRClassPackage || originatingPackage != modulePackage)) {
+            replaced = true
+            String[] spl = rref.split('\\.')
+            def type = spl[0]
+            def id = spl[1]
+            src = src.replaceAll("(?ms)(?<!\\.)R\\s*\\.\\s*$type\\s*\\.\\s*$id\\b", "${originatingPackage}.R.${type}.${id}")
+        }
+    }
+    if (replaced) {
+        println "Writing $srcFile"
+        srcFile.text = src
+    }
+}
+
+def namespacingConfigurator = { BaseVariant variant ->
+    def scope = variant.variantData.scope
+    def testedScope = variant.variantData.scope
+    if (variant instanceof UnitTestVariant || variant instanceof TestVariant) {
+        testedScope = variant.testedVariant.variantData.scope
+    }
+    def modulePackage = testedScope.variantConfiguration.originalApplicationId
+    def namespaceJavaTaskProvider = project.tasks.register(scope.getTaskName('namespace', 'Java')) {
+        def generateRFile = tasks.named(testedScope.getTaskName('generate', 'RFile'))
+        def artifactCollection = variant.variantData.scope.getJavaClasspathArtifacts(AndroidArtifacts.ConsumedConfigType.COMPILE_CLASSPATH,
+                AndroidArtifacts.ArtifactType.SYMBOL_LIST_WITH_PACKAGE_NAME, null)
+
+        dependsOn(artifactCollection.artifactFiles)
+        dependsOn(generateRFile)
+
+        doLast {
+            def resMap = getResMap(modulePackage, generateRFile.get().symbolsWithPackageNameOutputFile.get().asFile, artifactCollection)
+            variant.variantData.javaSources.flatten().each { collection ->
+                collection.files.each { srcFile ->
+                    namespaceFile(resMap, srcFile, modulePackage)
+                }
+            }
+        }
+    }
+    variant.getJavaCompileProvider().configure {
+        it.dependsOn namespaceJavaTaskProvider
+    }
+    tasks.named('namespace').configure {
+        it.dependsOn namespaceJavaTaskProvider
+    }
+
+    if (project.plugins.findPlugin('kotlin-android')) {
+        project.afterEvaluate {
+            def namespaceKotlinTaskProvider = project.tasks.register(scope.getTaskName('namespace', 'Kotlin')) {
+
+                def generateRFile = tasks.named(testedScope.getTaskName('generate', 'RFile'))
+                // The key to provide the code generation is in a private field in the VariantData implementation.
+                // It's required to get the artifact collection up to but not including the Kotlin code generation,
+                // otherwise there will be a circular task dependency and you don't want that.
+                def keys = BaseVariantData.metaClass.getProperty(variant.variantData, 'preJavacGeneratedBytecodeMap')
+                def key = keys.entrySet().toList().first().key
+                def artifactCollection = variant.variantData.scope.getJavaClasspathArtifacts(AndroidArtifacts.ConsumedConfigType.COMPILE_CLASSPATH,
+                        AndroidArtifacts.ArtifactType.SYMBOL_LIST_WITH_PACKAGE_NAME, key)
+
+                dependsOn(artifactCollection.artifactFiles)
+                dependsOn(generateRFile)
+
+                doLast {
+                    def resMap = getResMap(modulePackage, generateRFile.get().symbolsWithPackageNameOutputFile.get().asFile, artifactCollection)
+                    variant.sourceSets.each {
+                        it.convention.plugins['kotlin'].kotlin.files.each { srcFile ->
+                            namespaceFile(resMap, srcFile, modulePackage)
+                        }
+                    }
+                }
+            }
+
+            tasks.named(scope.getTaskName('compile', 'Kotlin')).configure {
+                it.dependsOn namespaceKotlinTaskProvider
+            }
+
+            tasks.named('namespace').configure {
+                it.dependsOn namespaceKotlinTaskProvider
+            }
+        }
+    }
+}
+
+project.tasks.register('namespace')
+
+def variants
+
+if (plugins.hasPlugin('com.android.application')) {
+    variants = project.android.applicationVariants
+} else {
+    variants = project.android.libraryVariants
+}
+
+variants.all namespacingConfigurator
+
+variants.all { BaseVariant owningVariant ->
+    owningVariant.unitTestVariant.with namespacingConfigurator
+    owningVariant.testVariant?.with namespacingConfigurator
+}
