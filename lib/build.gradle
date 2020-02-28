@@ -1,0 +1,13 @@
+apply(plugin: 'com.android.library')
+
+android {
+  compileSdkVersion 29
+  defaultConfig {
+    minSdkVersion 15
+  }
+}
+
+dependencies {
+  implementation 'com.facebook.android:facebook-login:6.1.0'
+}
+

@@ -4,6 +4,11 @@ Simple script that namespaces all Android R-class references where necessary, in
 
 It has been verified to work with Android Gradle Plugin 3.6 and Gradle 6.1. Any other version combination of said tools may or may not work.
 
+# Quick-start
+
+This repo contains an example application. Run `./gradlew namespace` in the root, and it will print
+that it rewrote `LibUtil.java` and `AppUtil.java` with namespaced resource references.
+
 # Suggested usage
 
 First ensure that your project compiles cleanly, otherwise you're in for a very confusing experience.
@@ -16,6 +21,7 @@ Enable namespaced R-classes for your project by adding
 
 ```
 android.namespacedRClass=true
+android.enableAppCompileTimeRClass=true
 ```
 
 to the `gradle.properties` file.
