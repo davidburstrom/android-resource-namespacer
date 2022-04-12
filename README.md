@@ -1,3 +1,7 @@
+# DEPRECATED
+
+This project is deprecated by the refactoring tool provided in Android Studio (https://developer.android.com/studio/releases#refactor-nontransitive-rclasses).
+
 # android-resource-namespacer
 
 Simple script that namespaces all Android R-class references where necessary, in Java and Kotlin code.
